@@ -1,0 +1,19 @@
+{
+  "name": "ratatube-hybrid-media-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hybrid Media Hub basado en Stremio con persistencia cloud en Supabase, perfiles familiares, motor avanzado de subtítulos y agente local temporal.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@ratatube/web",
+    "build": "npm run build --workspace=@ratatube/web",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "20.12.0",
+    "typescript": "5.4.5"
+  }
+}
