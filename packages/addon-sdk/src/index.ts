@@ -763,56 +763,56 @@ function getInternalOpenCinemaStreams(
 
     cloudEmbedStreams.push(
       {
-        name: 'Ratatube Cloud Web #1 (VidFast HD • Sync Real)',
-        title: `Servidor Web HTTPS #1${epSuffix} • 🇲🇽/🇪🇸 Multi-Audio + Telemetría de Tiempo Real • 1080p`,
+        name: 'Ratatube Cloud Web #1 (VidFast HD)',
+        title: `Servidor Web HTTPS #1${epSuffix} • Audio Original + Subtítulos ES • 1080p`,
         embedUrl: embed1,
         url: embed1,
-        audioLanguage: 'es-419',
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       },
       {
-        name: 'Ratatube Cloud Web #2 (VidLink Pro • Sync Real)',
-        title: `Servidor Web HTTPS #2${epSuffix} • 🇲🇽/🇪🇸 Multi-Audio + Telemetría de Tiempo Real • 1080p`,
+        name: 'Ratatube Cloud Web #2 (VidLink Pro)',
+        title: `Servidor Web HTTPS #2${epSuffix} • Audio Original + Subtítulos ES • 1080p`,
         embedUrl: embed2,
         url: embed2,
-        audioLanguage: 'es-419',
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       },
       {
-        name: 'Ratatube Cloud Web #3 (SuperEmbed)',
-        title: `Servidor Web HTTPS #3${epSuffix} • 🇲🇽 Español Latino / Sub ES • 1080p (Directo en navegador)`,
-        embedUrl: embed3,
-        url: embed3,
-        audioLanguage: 'es-419',
+        name: 'Ratatube Cloud Web #3 (MultiEmbed Multi-Audio)',
+        title: `Servidor Web HTTPS #3${epSuffix} • Multi-Audio (Original / Subtítulos ES) • 1080p`,
+        embedUrl: `${embed3}&lang=es`,
+        url: `${embed3}&lang=es`,
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       },
       {
         name: 'Ratatube Cloud Web #4 (2Embed Cloud)',
-        title: `Servidor Web HTTPS #4${epSuffix} • 🇲🇽/🇪🇸 Español Latino / Castellano / Sub ES • 1080p`,
+        title: `Servidor Web HTTPS #4${epSuffix} • Audio Original + Subtítulos ES • 1080p`,
         embedUrl: embed4,
         url: embed4,
-        audioLanguage: 'es-419',
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       },
       {
         name: 'Ratatube Cloud Web #5 (NontonGo HD)',
-        title: `Servidor Web HTTPS #5${epSuffix} • 🇲🇽/🇪🇸 Multi-Servidor Rápido • 1080p`,
+        title: `Servidor Web HTTPS #5${epSuffix} • Audio Original / Multi-Sub • 1080p`,
         embedUrl: embed5,
         url: embed5,
-        audioLanguage: 'es-419',
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       },
       {
         name: 'Ratatube Cloud Web #6 (AutoEmbed)',
-        title: `Servidor Web HTTPS #6${epSuffix} • 🇺🇸 Audio Original + Subtítulos Español • 1080p`,
+        title: `Servidor Web HTTPS #6${epSuffix} • Audio Original + Subtítulos Español • 1080p`,
         embedUrl: embed6,
         url: embed6,
-        audioLanguage: 'en',
+        audioLanguage: 'original',
         resolution: '1080p',
         sourceType: 'web-embed'
       }

@@ -10,7 +10,8 @@ import {
   StremioSubtitleTrack,
   SubtitleVisualStyle,
   WatchProgressEntry,
-  filterAndSortStreams
+  filterAndSortStreams,
+  DEFAULT_SUBTITLE_STYLE
 } from '@ratatube/shared';
 import {
   SubtitleCue,
@@ -144,8 +145,33 @@ export default function VideoPlayerModal({
     null
   );
 
-  // Estilo visual de subtítulos
-  const [subStyle, setSubStyle] = useState<SubtitleVisualStyle>(activeProfile.subtitleStyle);
+  // Estilo visual de subtítulos persistido en localStorage y en el perfil
+  const [subStyle, setSubStyle] = useState<SubtitleVisualStyle>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('ratatube_subtitle_style');
+        if (saved) {
+          return {
+            ...DEFAULT_SUBTITLE_STYLE,
+            ...(activeProfile?.subtitleStyle || {}),
+            ...JSON.parse(saved)
+          };
+        }
+      } catch {}
+    }
+    return {
+      ...DEFAULT_SUBTITLE_STYLE,
+      ...(activeProfile?.subtitleStyle || {})
+    };
+  });
+
+  const updateSubStyle = (newStyle: SubtitleVisualStyle) => {
+    setSubStyle(newStyle);
+    try {
+      localStorage.setItem('ratatube_subtitle_style', JSON.stringify(newStyle));
+    } catch {}
+    onSubtitleStyleChange?.(newStyle);
+  };
 
   // Episodios de serie para "Siguiente episodio automático"
   const currentEpisodeObj = meta.videos?.find(
@@ -225,27 +251,31 @@ export default function VideoPlayerModal({
         const list: EnrichedStreamSource[] = streamsRes.streams || [];
         setAllStreams(list);
 
-        // Seleccionar automáticamente la mejor fuente disponible según prioridad (Español Latino 1º)
-        const firstAvailable = list.find(
-          (s) => s.availability === 'available' && (s.streamUrl || s.embedUrl)
-        );
-        if (firstAvailable) {
-          setSelectedStream(firstAvailable);
-          if (firstAvailable.audioTracks?.[0]) {
-            setSelectedAudioTrackId(firstAvailable.audioTracks[0].id);
+        // Seleccionar automáticamente la mejor fuente disponible según prioridad y filtro de idioma
+        const sorted = filterAndSortStreams(list, langFilter, activeProfile.languagePriority);
+        const bestAvailable =
+          sorted.find((s) => s.availability === 'available' && (s.streamUrl || s.embedUrl)) ||
+          sorted[0] ||
+          list.find((s) => s.availability === 'available' && (s.streamUrl || s.embedUrl)) ||
+          list[0];
+
+        if (bestAvailable) {
+          setSelectedStream(bestAvailable);
+          if (bestAvailable.audioTracks?.[0]) {
+            setSelectedAudioTrackId(bestAvailable.audioTracks[0].id);
           }
         }
 
         // Combinar subtítulos de OpenSubtitles v3 + subtítulos declarados en el stream activo
         const apiSubs: StremioSubtitleTrack[] = subsRes.subtitles || [];
-        const embeddedSubs: StremioSubtitleTrack[] = (firstAvailable?.embeddedSubtitles || []).map(
-          (es) => ({
-            id: `stream-sub-${es.id}`,
+        const embeddedSubs: StremioSubtitleTrack[] = (bestAvailable?.embeddedSubtitles || []).map(
+          (es: { id?: string; url: string; lang: string; label?: string }) => ({
+            id: `stream-sub-${es.id || es.lang}`,
             url: es.url,
             lang: es.lang,
-            label: `🎬 ${es.label} (Incluido en fuente)`,
+            label: `🎬 ${es.label || es.lang} (Incluido en fuente)`,
             format: es.url.endsWith('.vtt') ? 'vtt' : es.url.endsWith('.ass') ? 'ass' : 'srt',
-            addonName: firstAvailable?.addonName || 'Stream'
+            addonName: bestAvailable?.addonName || 'Stream'
           })
         );
         const mergedSubs = [...apiSubs];
@@ -765,10 +795,20 @@ export default function VideoPlayerModal({
     [allStreams, langFilter, activeProfile.languagePriority]
   );
 
-  const availableTopServers = useMemo(
-    () => allStreams.filter((s) => s.availability === 'available').slice(0, 6),
-    [allStreams]
-  );
+  const availableTopServers = useMemo(() => {
+    // Si hay servidores disponibles directamente en el filtro activo
+    const filteredDirect = visibleStreams.filter(
+      (s) => s.availability === 'available' && (s.streamUrl || s.embedUrl)
+    );
+    if (filteredDirect.length > 0) {
+      return filteredDirect.slice(0, 6);
+    }
+    // Si no hay directos para este filtro, mostrar los primeros del filtro
+    if (visibleStreams.length > 0) {
+      return visibleStreams.slice(0, 6);
+    }
+    return allStreams.filter((s) => s.availability === 'available').slice(0, 6);
+  }, [visibleStreams, allStreams]);
 
   const formatTime = (sec: number) => {
     if (!sec || isNaN(sec)) return '00:00';
@@ -1456,23 +1496,13 @@ export default function VideoPlayerModal({
                   }
                 }}
                 onError={() => {
-                  const fallbackCloud = allStreams.find(
-                    (s) =>
-                      s.id !== selectedStream?.id &&
-                      s.availability === 'available' &&
-                      (s.playbackMode === 'web-embed' || s.sourceType === 'http')
-                  );
-                  if (selectedStream?.sourceType === 'torrent' && fallbackCloud) {
-                    setSelectedStream(fallbackCloud);
-                    return;
-                  }
                   if (selectedStream?.sourceType === 'torrent') {
                     setStreamError(
-                      'Esta fuente de Torrentio requiere el servicio P2P local (127.0.0.1:11470). Usa los Servidores Cloud Web HTTPS para reproducir directo en el navegador.'
+                      `Esta fuente (${selectedStream.declaredAudioLabel || 'Torrent P2P'}) requiere el Agente Local de Ratatube o Stremio Engine (127.0.0.1:11470) activo en tu equipo. Para ver ahora mismo en el navegador sin instalar nada, puedes seleccionar los Servidores Cloud Web (Audio Original + Subtítulos ES).`
                     );
                   } else {
                     setStreamError(
-                      'No se pudo reproducir directamente esta fuente. Selecciona otro servidor en la barra superior o en el panel derecho.'
+                      'No se pudo reproducir directamente esta fuente en el navegador. Selecciona otro servidor en la barra superior o en el panel de fuentes.'
                     );
                   }
                 }}
@@ -1531,7 +1561,10 @@ export default function VideoPlayerModal({
                     <button
                       onClick={() => {
                         const cloud = allStreams.find((s) => s.playbackMode === 'web-embed');
-                        if (cloud) setSelectedStream(cloud);
+                        if (cloud) {
+                          setSelectedStream(cloud);
+                          setStreamError(null);
+                        }
                       }}
                       className="rounded-lg bg-emerald-500 px-3.5 py-1.5 text-xs font-bold text-black hover:bg-emerald-400"
                     >
@@ -1548,9 +1581,15 @@ export default function VideoPlayerModal({
                   )}
                   <button
                     onClick={() => setActiveDrawer('sources')}
-                    className="rounded-lg bg-emerald-500 px-3.5 py-1.5 text-xs font-bold text-black hover:bg-emerald-400"
+                    className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-3.5 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/30"
                   >
-                    Ver todos los proveedores ({allStreams.length})
+                    Ver todas las fuentes ({allStreams.length})
+                  </button>
+                  <button
+                    onClick={() => setStreamError(null)}
+                    className="rounded-lg bg-white/10 px-3 py-1.5 text-xs text-gray-300 hover:bg-white/20"
+                  >
+                    Cerrar aviso
                   </button>
                 </div>
               </div>
@@ -1584,7 +1623,20 @@ export default function VideoPlayerModal({
               ].map((f) => (
                 <button
                   key={f.id}
-                  onClick={() => setLangFilter(f.id as LanguageFilterMode)}
+                  onClick={() => {
+                    const nextFilter = f.id as LanguageFilterMode;
+                    setLangFilter(nextFilter);
+                    const nextFiltered = filterAndSortStreams(allStreams, nextFilter, activeProfile.languagePriority);
+                    if (nextFiltered.length > 0 && (!selectedStream || !nextFiltered.some((s) => s.id === selectedStream.id))) {
+                      const bestNext =
+                        nextFiltered.find((s) => s.availability === 'available' && (s.streamUrl || s.embedUrl)) ||
+                        nextFiltered[0];
+                      if (bestNext) {
+                        setSelectedStream(bestNext);
+                        setStreamError(null);
+                      }
+                    }
+                  }}
                   className={`rounded-lg px-2.5 py-1 text-xs font-medium transition ${
                     langFilter === f.id
                       ? 'bg-emerald-500 text-black font-bold'
@@ -1599,10 +1651,24 @@ export default function VideoPlayerModal({
             {loadingStreams ? (
               <p className="text-xs text-gray-400">Consultando addons de Stremio activos...</p>
             ) : visibleStreams.length === 0 ? (
-              <p className="rounded-lg border border-white/10 bg-white/5 p-3 text-xs text-gray-400">
-                No hay fuentes para el filtro seleccionado. Cambia a &ldquo;Todos los idiomas&rdquo;
-                o instala más addons en la sección Fuentes y Addons.
-              </p>
+              <div className="rounded-xl border border-white/10 bg-white/5 p-4 text-xs text-gray-300 space-y-2">
+                <p className="font-semibold text-emerald-400">
+                  No se encontraron fuentes con audio doblado para este filtro.
+                </p>
+                <p className="text-gray-400">
+                  Para este título, los servidores en streaming disponen de audio original (ej. Japonés o Inglés). Puedes reproducirlo con subtítulos sincronizados en español usando &ldquo;Subtítulos en Español&rdquo;.
+                </p>
+                <button
+                  onClick={() => {
+                    setLangFilter('sub-es');
+                    const nextFiltered = filterAndSortStreams(allStreams, 'sub-es', activeProfile.languagePriority);
+                    if (nextFiltered[0]) setSelectedStream(nextFiltered[0]);
+                  }}
+                  className="rounded-lg bg-emerald-500/20 border border-emerald-500/40 px-3 py-1.5 text-xs font-bold text-emerald-300 hover:bg-emerald-500/30"
+                >
+                  💬 Cambiar a Subtítulos en Español
+                </button>
+              </div>
             ) : (
               <div className="space-y-3">
                 {visibleStreams.map((stream) => {
@@ -2013,8 +2079,7 @@ export default function VideoPlayerModal({
                   value={subStyle.fontSize}
                   onChange={(e) => {
                     const updated = { ...subStyle, fontSize: Number(e.target.value) };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="w-full accent-emerald-500"
                 />
@@ -2026,8 +2091,7 @@ export default function VideoPlayerModal({
                   value={subStyle.fontFamily}
                   onChange={(e) => {
                     const updated = { ...subStyle, fontFamily: e.target.value };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="w-full rounded-lg border border-white/10 bg-black px-3 py-2 text-white"
                 >
@@ -2047,8 +2111,7 @@ export default function VideoPlayerModal({
                         key={color}
                         onClick={() => {
                           const updated = { ...subStyle, textColor: color };
-                          setSubStyle(updated);
-                          onSubtitleStyleChange?.(updated);
+                          updateSubStyle(updated);
                         }}
                         className={`h-7 w-7 rounded-full border-2 ${
                           subStyle.textColor === color ? 'border-emerald-500' : 'border-white/20'
@@ -2067,8 +2130,7 @@ export default function VideoPlayerModal({
                         key={bg}
                         onClick={() => {
                           const updated = { ...subStyle, backgroundColor: bg };
-                          setSubStyle(updated);
-                          onSubtitleStyleChange?.(updated);
+                          updateSubStyle(updated);
                         }}
                         className={`h-7 w-7 rounded-full border-2 ${
                           subStyle.backgroundColor === bg ? 'border-emerald-500' : 'border-white/20'
@@ -2092,8 +2154,7 @@ export default function VideoPlayerModal({
                   value={subStyle.backgroundOpacity}
                   onChange={(e) => {
                     const updated = { ...subStyle, backgroundOpacity: Number(e.target.value) };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="w-full accent-emerald-500"
                 />
@@ -2110,8 +2171,7 @@ export default function VideoPlayerModal({
                   value={subStyle.verticalOffsetPct}
                   onChange={(e) => {
                     const updated = { ...subStyle, verticalOffsetPct: Number(e.target.value) };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="w-full accent-emerald-500"
                 />
@@ -2129,8 +2189,7 @@ export default function VideoPlayerModal({
                   value={subStyle.outlineWidth}
                   onChange={(e) => {
                     const updated = { ...subStyle, outlineWidth: Number(e.target.value) };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="w-full accent-emerald-500"
                 />
@@ -2143,8 +2202,7 @@ export default function VideoPlayerModal({
                   checked={subStyle.shadow}
                   onChange={(e) => {
                     const updated = { ...subStyle, shadow: e.target.checked };
-                    setSubStyle(updated);
-                    onSubtitleStyleChange?.(updated);
+                    updateSubStyle(updated);
                   }}
                   className="h-4 w-4 accent-emerald-500"
                 />

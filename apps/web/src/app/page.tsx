@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   FamilyAccount,
   FamilyProfile,
@@ -220,13 +220,36 @@ export default function RatatubeHubPage() {
   const [activeProfile, setActiveProfile] = useState<FamilyProfile | null>(() => {
     if (typeof window === 'undefined') return GUEST_PROFILE_CLIENT;
     try {
+      let savedStyle: SubtitleVisualStyle | null = null;
+      try {
+        const rawStyle = localStorage.getItem('ratatube_subtitle_style');
+        if (rawStyle) savedStyle = JSON.parse(rawStyle);
+      } catch {}
+
       const raw = localStorage.getItem(AUTH_STORAGE_KEY);
       if (raw) {
         const p = JSON.parse(raw);
         if (p?.account && Array.isArray(p?.profiles) && p.profiles.length > 0) {
-          const match = p.profiles.find((pr: FamilyProfile) => pr.id === p.activeProfileId);
-          return match || p.profiles[0];
+          const match = p.profiles.find((pr: FamilyProfile) => pr.id === p.activeProfileId) || p.profiles[0];
+          if (match) {
+            return {
+              ...match,
+              subtitleStyle: {
+                ...match.subtitleStyle,
+                ...(savedStyle || {})
+              }
+            };
+          }
         }
+      }
+      if (savedStyle) {
+        return {
+          ...GUEST_PROFILE_CLIENT,
+          subtitleStyle: {
+            ...GUEST_PROFILE_CLIENT.subtitleStyle,
+            ...savedStyle
+          }
+        };
       }
     } catch {}
     return GUEST_PROFILE_CLIENT;
@@ -755,21 +778,35 @@ export default function RatatubeHubPage() {
     setAddonMessage(`✓ Addon "${data.installed?.name}" instalado y activo.`);
   };
 
-  const handleUpdateSubtitleStyle = async (newStyle: SubtitleVisualStyle) => {
+  const subStyleDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleUpdateSubtitleStyle = (newStyle: SubtitleVisualStyle) => {
+    try {
+      localStorage.setItem('ratatube_subtitle_style', JSON.stringify(newStyle));
+    } catch {}
+
     if (!activeProfile) return;
     const updatedProfile = { ...activeProfile, subtitleStyle: newStyle };
     setActiveProfile(updatedProfile);
+
     if (activeProfile.isGuest || activeProfile.id === 'guest-profile') {
       return;
     }
+
     const updatedProfiles = profiles.map((p) => (p.id === updatedProfile.id ? updatedProfile : p));
     setProfiles(updatedProfiles);
     persistSessionToBrowser(account, updatedProfiles, updatedProfile);
-    await fetch('/api/profiles', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedProfile)
-    });
+
+    if (subStyleDebounceTimerRef.current) {
+      clearTimeout(subStyleDebounceTimerRef.current);
+    }
+    subStyleDebounceTimerRef.current = setTimeout(() => {
+      fetch('/api/profiles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedProfile)
+      }).catch(() => {});
+    }, 600);
   };
 
   const heroItem = moviesCatalog[0] || seriesCatalog[0];

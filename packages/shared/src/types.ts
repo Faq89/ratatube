@@ -27,6 +27,18 @@ export interface SubtitleVisualStyle {
   shadow: boolean;
 }
 
+export const DEFAULT_SUBTITLE_STYLE: SubtitleVisualStyle = {
+  fontSize: 24,
+  fontFamily: 'Inter, system-ui, sans-serif',
+  textColor: '#FFFFFF',
+  backgroundColor: '#000000',
+  backgroundOpacity: 0.6,
+  verticalOffsetPct: 10,
+  outlineWidth: 2,
+  outlineColor: '#000000',
+  shadow: true
+};
+
 export interface UserPersonalInfo {
   firstName?: string;
   lastName?: string;

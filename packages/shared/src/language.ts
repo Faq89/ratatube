@@ -93,11 +93,13 @@ export function classifyStreamLanguage(
   const descriptorText = [raw.name || '', raw.title || '', raw.description || ''].join(' ');
 
   const hasLatinoMarker =
-    /🇲🇽|🇦🇷|🇨🇴|🇨🇱|🇵🇪|🇻🇪|\b(es-419|es-mx|latino|latam|audio\s*latino|esp\s*latino|dual\s*\[?lat\]?|\[lat\])\b/i.test(
+    /🇲🇽|🇦🇷|🇨🇴|🇨🇱|🇵🇪|🇻🇪/i.test(descriptorText) ||
+    /(?:^|[\s_.\-\(\[\{])(es-419|es-la|es-mx|es-ar|latino|latam|audio[\s_.-]*latino|esp[\s_.-]*latino|dual[\s_.-]*lat(?:ino)?|lat|spa-lat)(?:$|[\s_.\-\)\]\}])/i.test(
       descriptorText
     );
   const hasCastellanoMarker =
-    /🇪🇸|\b(es-es|castellano|audio\s*castellano|esp\s*castellano|\[cast\]|\[esp-es\])\b/i.test(
+    /🇪🇸/i.test(descriptorText) ||
+    /(?:^|[\s_.\-\(\[\{])(es-es|castellano|cast|esp-es|audio[\s_.-]*castellano|esp[\s_.-]*castellano)(?:$|[\s_.\-\)\]\}])/i.test(
       descriptorText
     );
   const hasSpanishSubMarker =
