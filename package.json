@@ -8,8 +8,8 @@
     "apps/*"
   ],
   "scripts": {
-    "dev": "npm run dev --workspace=@ratatube/web",
-    "build": "npm run build --workspace=@ratatube/web",
+    "dev": "npm --workspace=@ratatube/web run dev",
+    "build": "npm --workspace=@ratatube/web run build",
     "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {
