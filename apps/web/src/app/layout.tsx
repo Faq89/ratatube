@@ -4,7 +4,12 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Ratatube — Hybrid Media Hub (Stremio + Cloud + Agente Local)',
   description:
-    'Plataforma multimedia híbrida y multiusuario basada en el ecosistema Stremio, con prioridad en Español Latino, motor avanzado de subtítulos y caché local efímero.'
+    'Plataforma multimedia híbrida y multiusuario basada en el ecosistema Stremio, con prioridad en Español Latino, motor avanzado de subtítulos y caché local efímero.',
+  icons: {
+    icon: '/icon.svg',
+    shortcut: '/icon.svg',
+    apple: '/icon.svg'
+  }
 };
 
 export default function RootLayout({

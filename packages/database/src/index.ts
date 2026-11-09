@@ -100,18 +100,22 @@ export function normalizeSupabaseProjectUrl(rawUrl: string): string {
  */
 class SupabaseRestBridge {
   public readonly baseUrl: string;
+  public lastRlsBlocked = false;
+  public lastRlsError = '';
 
   constructor(
     rawUrl: string,
-    private readonly apiKey: string
+    private readonly apiKey: string,
+    private readonly serviceRoleKey?: string
   ) {
     this.baseUrl = normalizeSupabaseProjectUrl(rawUrl);
   }
 
   private headers(prefer?: string): Record<string, string> {
+    const key = (this.serviceRoleKey || '').trim() || this.apiKey;
     const h: Record<string, string> = {
-      apikey: this.apiKey,
-      Authorization: `Bearer ${this.apiKey}`,
+      apikey: key,
+      Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json'
     };
     if (prefer) h['Prefer'] = prefer;
@@ -120,9 +124,13 @@ class SupabaseRestBridge {
 
   async select<T = any>(table: string, queryParams = ''): Promise<T[] | null> {
     const url = `${this.baseUrl}/rest/v1/${table}${queryParams ? `?${queryParams}` : ''}`;
-    const res = await fetch(url, { headers: this.headers() });
-    if (!res.ok) return null;
-    return (await res.json()) as T[];
+    try {
+      const res = await fetch(url, { headers: this.headers() });
+      if (!res.ok) return null;
+      return (await res.json()) as T[];
+    } catch {
+      return null;
+    }
   }
 
   async upsert(
@@ -132,21 +140,70 @@ class SupabaseRestBridge {
   ): Promise<boolean> {
     const conflictQuery = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
     const url = `${this.baseUrl}/rest/v1/${table}${conflictQuery}`;
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: this.headers('resolution=merge-duplicates,return=minimal'),
-      body: JSON.stringify(payload)
-    });
-    return res.ok;
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: this.headers('resolution=merge-duplicates,return=representation'),
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        if (
+          body.includes('violates row-level security policy') ||
+          res.status === 401 ||
+          res.status === 403
+        ) {
+          this.lastRlsBlocked = true;
+          this.lastRlsError = `RLS activo en '${table}': se requiere ejecutar el script SQL en Supabase o configurar la Service Role Key.`;
+          console.warn(`[SupabaseRestBridge] RLS bloqueó escritura en ${table}:`, body);
+        } else {
+          console.warn(`[SupabaseRestBridge] Error al escribir en ${table} (${res.status}):`, body);
+        }
+        return false;
+      }
+      this.lastRlsBlocked = false;
+      this.lastRlsError = '';
+      return true;
+    } catch (err: any) {
+      console.warn(`[SupabaseRestBridge] Error de red en ${table}:`, err?.message);
+      return false;
+    }
   }
 
   async deleteById(table: string, id: string): Promise<boolean> {
     const url = `${this.baseUrl}/rest/v1/${table}?id=eq.${encodeURIComponent(id)}`;
-    const res = await fetch(url, {
-      method: 'DELETE',
-      headers: this.headers('return=minimal')
-    });
-    return res.ok;
+    try {
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: this.headers('return=minimal')
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async checkRlsStatus(): Promise<{ blocked: boolean; message: string }> {
+    try {
+      const url = `${this.baseUrl}/rest/v1/family_accounts`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: this.headers(),
+        body: JSON.stringify({ id: '00000000-0000-0000-0000-000000000000' })
+      });
+      const text = await res.text().catch(() => '');
+      if (text.includes('violates row-level security policy') || res.status === 401) {
+        this.lastRlsBlocked = true;
+        this.lastRlsError =
+          'RLS activo en Supabase. Bloquea la inserción de cuentas de nuevos dispositivos.';
+        return { blocked: true, message: this.lastRlsError };
+      }
+      this.lastRlsBlocked = false;
+      this.lastRlsError = '';
+      return { blocked: false, message: 'Escritura y lectura permitidas en Supabase.' };
+    } catch {
+      return { blocked: false, message: 'No se pudo verificar el estado de RLS por error de red.' };
+    }
   }
 }
 
@@ -168,8 +225,10 @@ interface EphemeralMemoryStore {
   registeredAccounts: Map<string, RegisteredAccountRecord>;
   supabaseUrl: string;
   supabaseAnonKey: string;
+  supabaseServiceRoleKey: string;
   supabaseBridge: SupabaseRestBridge | null;
   seededRemote: boolean;
+  lastRlsBlocked: boolean;
 }
 
 const DEFAULT_ACCOUNT_ID = '00000000-0000-4000-8000-000000000001';
@@ -182,14 +241,17 @@ function createInitialStore(): EphemeralMemoryStore {
   const envUrl = normalizeSupabaseProjectUrl(
     process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://aejfuovgwgweipyyexjt.supabase.co'
   );
-  const envKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  const envAnonKey =
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
     'sb_publishable_sdv8mvdHn865Svz9Jgyoqw_1MehRmn8';
+  const envServiceKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    '';
 
   let supabaseBridge: SupabaseRestBridge | null = null;
-  if (envUrl && envKey && envUrl.startsWith('http')) {
-    supabaseBridge = new SupabaseRestBridge(envUrl, envKey);
+  if (envUrl && envAnonKey && envUrl.startsWith('http')) {
+    supabaseBridge = new SupabaseRestBridge(envUrl, envAnonKey, envServiceKey || undefined);
   }
 
   const profiles: FamilyProfile[] = [
@@ -258,9 +320,11 @@ function createInitialStore(): EphemeralMemoryStore {
     localPasswordHashes: new Map<string, string>(),
     registeredAccounts: new Map<string, RegisteredAccountRecord>(),
     supabaseUrl: envUrl,
-    supabaseAnonKey: envKey,
+    supabaseAnonKey: envAnonKey,
+    supabaseServiceRoleKey: envServiceKey,
     supabaseBridge,
-    seededRemote: false
+    seededRemote: false,
+    lastRlsBlocked: false
   };
 }
 
@@ -277,40 +341,53 @@ function getStore(): EphemeralMemoryStore {
   return s;
 }
 
-export function configureSupabaseCloud(url: string, anonKey: string): {
+export function configureSupabaseCloud(
+  url: string,
+  anonKey: string,
+  serviceRoleKey?: string
+): {
   connected: boolean;
   url: string;
+  hasServiceKey: boolean;
 } {
   const store = getStore();
   const cleanUrl = normalizeSupabaseProjectUrl(url);
   const cleanKey = anonKey.trim();
+  const cleanServiceKey = (serviceRoleKey || '').trim();
 
   if (!cleanUrl || !cleanKey) {
     store.supabaseUrl = '';
     store.supabaseAnonKey = '';
+    store.supabaseServiceRoleKey = '';
     store.supabaseBridge = null;
-    return { connected: false, url: '' };
+    return { connected: false, url: '', hasServiceKey: false };
   }
 
   store.supabaseUrl = cleanUrl;
   store.supabaseAnonKey = cleanKey;
-  store.supabaseBridge = new SupabaseRestBridge(cleanUrl, cleanKey);
+  store.supabaseServiceRoleKey = cleanServiceKey;
+  store.supabaseBridge = new SupabaseRestBridge(cleanUrl, cleanKey, cleanServiceKey || undefined);
   store.seededRemote = false;
 
-  return { connected: true, url: cleanUrl };
+  return { connected: true, url: cleanUrl, hasServiceKey: Boolean(cleanServiceKey) };
 }
 
 export function getSupabaseStatus(): {
   connected: boolean;
   url: string;
   mode: 'supabase-cloud' | 'ephemeral-ram-session';
+  hasServiceKey: boolean;
+  rlsBlocked: boolean;
 } {
   const store = getStore();
   const connected = Boolean(store.supabaseBridge && store.supabaseUrl);
+  const isRls = store.supabaseBridge?.lastRlsBlocked || store.lastRlsBlocked;
   return {
     connected,
     url: store.supabaseUrl,
-    mode: connected ? 'supabase-cloud' : 'ephemeral-ram-session'
+    mode: connected ? 'supabase-cloud' : 'ephemeral-ram-session',
+    hasServiceKey: Boolean(store.supabaseServiceRoleKey),
+    rlsBlocked: Boolean(isRls)
   };
 }
 
@@ -371,6 +448,8 @@ export async function registerUserAccount(input: {
   activeProfile: FamilyProfile;
   watchProgress: WatchProgressEntry[];
   library: LibraryEntry[];
+  cloudSyncSuccess?: boolean;
+  cloudRlsBlocked?: boolean;
 }> {
   const store = getStore();
   const cleanEmail = (input.email || '').trim().toLowerCase();
@@ -397,7 +476,7 @@ export async function registerUserAccount(input: {
 
   if (store.supabaseBridge) {
     const existing = await store.supabaseBridge
-      .select('family_accounts', `email=eq.${encodeURIComponent(cleanEmail)}&limit=1`)
+      .select('family_accounts', `email=ilike.${encodeURIComponent(cleanEmail)}&limit=1`)
       .catch(() => null);
     if (Array.isArray(existing) && existing.length > 0) {
       throw new Error('Ya existe una cuenta registrada con ese correo electrónico. Inicia sesión.');
@@ -423,7 +502,7 @@ export async function registerUserAccount(input: {
     accountId,
     name: displayName,
     avatar: '🎬',
-    avatarColor: '#f59e0b',
+    avatarColor: '#10b981',
     isAdmin: true,
     isKid: false,
     maxAgeRating: 'ALL',
@@ -435,42 +514,46 @@ export async function registerUserAccount(input: {
     createdAt: now
   };
 
+  let cloudSyncSuccess = false;
+  let cloudRlsBlocked = false;
+
   if (store.supabaseBridge) {
-    const accOk = await store.supabaseBridge
-      .upsert(
-        'family_accounts',
-        {
-          id: account.id,
-          email: account.email,
-          family_name: account.familyName,
-          password_hash: passwordHash,
-          invite_code: account.inviteCode
-        },
-        'id'
-      )
-      .catch(() => false);
+    const accOk = await store.supabaseBridge.upsert(
+      'family_accounts',
+      {
+        id: account.id,
+        email: account.email,
+        family_name: account.familyName,
+        password_hash: passwordHash,
+        invite_code: account.inviteCode
+      },
+      'id'
+    );
 
     if (accOk) {
-      await store.supabaseBridge
-        .upsert(
-          'family_profiles',
-          {
-            id: mainProfile.id,
-            account_id: mainProfile.accountId,
-            name: mainProfile.name,
-            avatar: mainProfile.avatar,
-            avatar_color: mainProfile.avatarColor,
-            is_admin: mainProfile.isAdmin,
-            is_kid: mainProfile.isKid,
-            max_age_rating: mainProfile.maxAgeRating,
-            pin_code: mainProfile.pinCode,
-            language_priority: mainProfile.languagePriority,
-            default_language_filter: mainProfile.defaultLanguageFilter,
-            subtitle_style: buildSubtitleStylePayload(mainProfile)
-          },
-          'id'
-        )
-        .catch(() => false);
+      await store.supabaseBridge.upsert(
+        'family_profiles',
+        {
+          id: mainProfile.id,
+          account_id: mainProfile.accountId,
+          name: mainProfile.name,
+          avatar: mainProfile.avatar,
+          avatar_color: mainProfile.avatarColor,
+          is_admin: mainProfile.isAdmin,
+          is_kid: mainProfile.isKid,
+          max_age_rating: mainProfile.maxAgeRating,
+          pin_code: mainProfile.pinCode,
+          language_priority: mainProfile.languagePriority,
+          default_language_filter: mainProfile.defaultLanguageFilter,
+          subtitle_style: buildSubtitleStylePayload(mainProfile)
+        },
+        'id'
+      );
+      cloudSyncSuccess = true;
+      store.lastRlsBlocked = false;
+    } else {
+      cloudRlsBlocked = store.supabaseBridge.lastRlsBlocked;
+      store.lastRlsBlocked = cloudRlsBlocked;
     }
   }
 
@@ -489,7 +572,9 @@ export async function registerUserAccount(input: {
     profiles: [mainProfile],
     activeProfile: mainProfile,
     watchProgress: [],
-    library: []
+    library: [],
+    cloudSyncSuccess,
+    cloudRlsBlocked
   };
 }
 
@@ -513,6 +598,8 @@ export async function loginUserAccount(input: {
   activeProfile: FamilyProfile;
   watchProgress: WatchProgressEntry[];
   library: LibraryEntry[];
+  cloudSyncSuccess?: boolean;
+  cloudRlsBlocked?: boolean;
 }> {
   const store = getStore();
   const cleanEmail = (input.email || '').trim().toLowerCase();
@@ -525,9 +612,15 @@ export async function loginUserAccount(input: {
   const passwordHash = hashPassword(rawPassword);
 
   if (store.supabaseBridge) {
-    const accountsData = await store.supabaseBridge
-      .select('family_accounts', `email=eq.${encodeURIComponent(cleanEmail)}&limit=1`)
+    let accountsData = await store.supabaseBridge
+      .select('family_accounts', `email=ilike.${encodeURIComponent(cleanEmail)}&limit=1`)
       .catch(() => null);
+
+    if (!Array.isArray(accountsData) || accountsData.length === 0) {
+      accountsData = await store.supabaseBridge
+        .select('family_accounts', `email=eq.${encodeURIComponent(cleanEmail)}&limit=1`)
+        .catch(() => null);
+    }
 
     if (Array.isArray(accountsData) && accountsData.length > 0) {
       const accRow = accountsData[0];
@@ -768,7 +861,195 @@ export async function loginUserAccount(input: {
     };
   }
 
-  throw new Error('No encontramos ninguna cuenta con ese correo electrónico.');
+  if (store.supabaseBridge) {
+    const probe = await store.supabaseBridge.checkRlsStatus().catch(() => null);
+    if (probe?.blocked) {
+      store.lastRlsBlocked = true;
+      throw new Error(
+        'No encontramos tu cuenta en Supabase Cloud. Tu base de datos tiene RLS (Row Level Security) activo, lo que impidió sincronizar las cuentas entre dispositivos. Ejecuta el script SQL en Supabase o usa tu Código de Sincronización.'
+      );
+    }
+  }
+
+  throw new Error('No encontramos ninguna cuenta registrada con este correo electrónico.');
+}
+
+/**
+ * Sincroniza explícitamente una cuenta existente y sus perfiles hacia Supabase Cloud.
+ */
+export async function syncUserAccountToCloud(input: {
+  account: FamilyAccount;
+  profiles: FamilyProfile[];
+  passwordHash?: string;
+}): Promise<{
+  ok: boolean;
+  rlsBlocked: boolean;
+  message: string;
+}> {
+  const store = getStore();
+  if (!store.supabaseBridge) {
+    return { ok: false, rlsBlocked: false, message: 'Supabase no está configurado.' };
+  }
+
+  const { account, profiles, passwordHash } = input;
+  const hash =
+    passwordHash ||
+    store.localPasswordHashes.get(account.email.toLowerCase()) ||
+    hashPassword('temporary-default-1234');
+
+  const accOk = await store.supabaseBridge.upsert(
+    'family_accounts',
+    {
+      id: account.id,
+      email: account.email.toLowerCase(),
+      family_name: account.familyName,
+      password_hash: hash,
+      invite_code: account.inviteCode
+    },
+    'id'
+  );
+
+  if (!accOk) {
+    const isRls = store.supabaseBridge.lastRlsBlocked;
+    return {
+      ok: false,
+      rlsBlocked: isRls,
+      message: isRls
+        ? 'RLS activo en Supabase impidió sincronizar la cuenta. Deshabilita RLS o agrega la Service Role Key.'
+        : 'Error al sincronizar cuenta con Supabase.'
+    };
+  }
+
+  for (const prof of profiles) {
+    await store.supabaseBridge.upsert(
+      'family_profiles',
+      {
+        id: prof.id,
+        account_id: prof.accountId,
+        name: prof.name,
+        avatar: prof.avatar,
+        avatar_color: prof.avatarColor,
+        is_admin: prof.isAdmin,
+        is_kid: prof.isKid,
+        max_age_rating: prof.maxAgeRating,
+        pin_code: prof.pinCode,
+        language_priority: prof.languagePriority,
+        default_language_filter: prof.defaultLanguageFilter,
+        subtitle_style: buildSubtitleStylePayload(prof)
+      },
+      'id'
+    );
+  }
+
+  store.lastRlsBlocked = false;
+  return { ok: true, rlsBlocked: false, message: 'Cuenta sincronizada exitosamente con Supabase.' };
+}
+
+/**
+ * Actualiza la contraseña del usuario.
+ */
+export async function changeUserPassword(input: {
+  email: string;
+  newPassword: string;
+  oldPassword?: string;
+}): Promise<{ success: boolean; message: string }> {
+  const store = getStore();
+  const cleanEmail = (input.email || '').trim().toLowerCase();
+  const newPassword = (input.newPassword || '').trim();
+
+  if (newPassword.length < 4) {
+    throw new Error('La nueva contraseña debe tener al menos 4 caracteres.');
+  }
+
+  const newHash = hashPassword(newPassword);
+
+  const currentHash = store.localPasswordHashes.get(cleanEmail);
+  if (input.oldPassword && currentHash) {
+    const oldHash = hashPassword(input.oldPassword.trim());
+    if (oldHash !== currentHash) {
+      throw new Error('La contraseña actual es incorrecta.');
+    }
+  }
+
+  store.localPasswordHashes.set(cleanEmail, newHash);
+  const mem = store.registeredAccounts.get(cleanEmail);
+  if (mem) {
+    mem.passwordHash = newHash;
+  }
+
+  if (store.supabaseBridge) {
+    await store.supabaseBridge
+      .upsert(
+        'family_accounts',
+        {
+          email: cleanEmail,
+          password_hash: newHash
+        },
+        'email'
+      )
+      .catch(() => false);
+  }
+
+  return { success: true, message: 'Contraseña actualizada correctamente.' };
+}
+
+/**
+ * Actualiza los datos personales asociados a una cuenta.
+ */
+export async function updateUserPersonalInfo(input: {
+  email: string;
+  personalInfo: UserPersonalInfo;
+}): Promise<{ success: boolean; account: FamilyAccount; profiles: FamilyProfile[] }> {
+  const store = getStore();
+  const cleanEmail = (input.email || '').trim().toLowerCase();
+  const cleanInfo = sanitizePersonalInfo(input.personalInfo);
+
+  const mem = store.registeredAccounts.get(cleanEmail);
+  if (mem) {
+    mem.account.personalInfo = cleanInfo;
+    if (mem.profiles.length > 0) {
+      mem.profiles[0].personalInfo = cleanInfo;
+    }
+  }
+
+  if (store.account.email.toLowerCase() === cleanEmail) {
+    store.account.personalInfo = cleanInfo;
+    const admin =
+      store.profiles.find((p) => p.accountId === store.account.id && p.isAdmin) ||
+      store.profiles[0];
+    if (admin) {
+      admin.personalInfo = cleanInfo;
+      if (store.supabaseBridge) {
+        await store.supabaseBridge
+          .upsert(
+            'family_profiles',
+            {
+              id: admin.id,
+              subtitle_style: buildSubtitleStylePayload(admin)
+            },
+            'id'
+          )
+          .catch(() => false);
+      }
+    }
+  }
+
+  return {
+    success: true,
+    account: mem ? mem.account : store.account,
+    profiles: mem ? mem.profiles : store.profiles
+  };
+}
+
+/**
+ * Realiza un test en vivo para comprobar si Supabase permite inserciones o si RLS las bloquea.
+ */
+export async function checkSupabaseRlsProbe(): Promise<{ blocked: boolean; message: string }> {
+  const store = getStore();
+  if (!store.supabaseBridge) {
+    return { blocked: false, message: 'Supabase no está configurado.' };
+  }
+  return store.supabaseBridge.checkRlsStatus();
 }
 
 export async function getFamilyAccountAndProfiles(): Promise<{

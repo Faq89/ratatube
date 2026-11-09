@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   registerUserAccount,
   loginUserAccount,
-  getSupabaseStatus
+  getSupabaseStatus,
+  syncUserAccountToCloud,
+  changeUserPassword,
+  updateUserPersonalInfo,
+  checkSupabaseRlsProbe
 } from '@ratatube/database';
 
 export async function POST(req: NextRequest) {
@@ -30,6 +34,49 @@ export async function POST(req: NextRequest) {
       });
       return NextResponse.json({
         ...result,
+        cloudStatus: getSupabaseStatus()
+      });
+    }
+
+    if (action === 'sync-to-cloud') {
+      const result = await syncUserAccountToCloud({
+        account: body.account,
+        profiles: body.profiles,
+        passwordHash: body.passwordHash
+      });
+      return NextResponse.json({
+        ...result,
+        cloudStatus: getSupabaseStatus()
+      });
+    }
+
+    if (action === 'change-password') {
+      const result = await changeUserPassword({
+        email: body.email || '',
+        newPassword: body.newPassword || '',
+        oldPassword: body.oldPassword
+      });
+      return NextResponse.json({
+        ...result,
+        cloudStatus: getSupabaseStatus()
+      });
+    }
+
+    if (action === 'update-personal-info') {
+      const result = await updateUserPersonalInfo({
+        email: body.email || '',
+        personalInfo: body.personalInfo || {}
+      });
+      return NextResponse.json({
+        ...result,
+        cloudStatus: getSupabaseStatus()
+      });
+    }
+
+    if (action === 'check-rls') {
+      const probe = await checkSupabaseRlsProbe();
+      return NextResponse.json({
+        ...probe,
         cloudStatus: getSupabaseStatus()
       });
     }

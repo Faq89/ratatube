@@ -1,5 +1,44 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#f59e0b"/>
-  <path d="M22 18L48 32L22 46V18Z" fill="#090b10"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#05080e"/>
+    </linearGradient>
+    <linearGradient id="emeraldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="50%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6ee7b7"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+    <filter id="emeraldGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="5" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
 
+  <!-- Fondo oscuro con bordes redondeados y contorno esmeralda elegante -->
+  <rect x="4" y="4" width="120" height="120" rx="30" fill="url(#bgGrad)" stroke="#10b981" stroke-width="2.5" stroke-opacity="0.5"/>
+
+  <!-- Halo de resplandor esmeralda central -->
+  <circle cx="64" cy="64" r="42" fill="#10b981" opacity="0.12" filter="url(#emeraldGlow)"/>
+
+  <!-- Claqueta de cine superior con franjas diagonales -->
+  <path d="M28 34C28 30.686 30.686 28 34 28H94C97.314 28 100 30.686 100 34V42H28V34Z" fill="url(#emeraldGrad)"/>
+  <polygon points="40,28 47,28 39,42 32,42" fill="#090b10"/>
+  <polygon points="58,28 65,28 57,42 50,42" fill="#090b10"/>
+  <polygon points="76,28 83,28 75,42 68,42" fill="#090b10"/>
+  <polygon points="94,28 100,28 93,42 86,42" fill="#090b10"/>
+
+  <!-- Cuerpo de la claqueta / marco de reproducción -->
+  <rect x="28" y="44" width="72" height="54" rx="8" fill="#0b1120" stroke="#10b981" stroke-width="2" stroke-opacity="0.3"/>
+
+  <!-- Letra estilizada 'R' / Ícono de Reproducción Cinemático -->
+  <!-- Barra vertical izquierda del logo -->
+  <rect x="42" y="52" width="6.5" height="38" rx="3.25" fill="url(#accentGrad)"/>
+  
+  <!-- Triángulo dinámico de Play con brillo esmeralda -->
+  <path d="M56 54L86 71L56 88V54Z" fill="url(#emeraldGrad)" filter="url(#emeraldGlow)"/>
+</svg>

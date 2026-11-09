@@ -42,11 +42,63 @@ import {
   LogIn,
   LogOut,
   UserPlus,
+  Eye,
+  EyeOff,
+  Key,
+  Copy,
+  Check,
   X
 } from 'lucide-react';
 
 const AUTH_STORAGE_KEY = 'ratatube_auth_session_v1';
 const ACCOUNTS_VAULT_KEY = 'ratatube_accounts_vault_v1';
+
+const SUPABASE_RLS_UNLOCK_SQL = `ALTER TABLE public.family_accounts DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.family_profiles DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.installed_addons DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.watch_progress DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.library_items DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.subtitle_sync_presets DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.local_agents DISABLE ROW LEVEL SECURITY;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;`;
+
+function generateSyncCode(acc: FamilyAccount, profs: FamilyProfile[]): string {
+  try {
+    const payload = JSON.stringify({
+      id: acc.id,
+      email: acc.email,
+      familyName: acc.familyName,
+      inviteCode: acc.inviteCode,
+      personalInfo: acc.personalInfo,
+      profiles: profs
+    });
+    return 'RT-' + btoa(encodeURIComponent(payload));
+  } catch {
+    return '';
+  }
+}
+
+function parseSyncCode(code: string): { account: FamilyAccount; profiles: FamilyProfile[] } | null {
+  try {
+    const raw = code.trim().replace(/^RT-/, '');
+    const json = decodeURIComponent(atob(raw));
+    const parsed = JSON.parse(json);
+    if (parsed.id && parsed.email && Array.isArray(parsed.profiles)) {
+      return {
+        account: {
+          id: parsed.id,
+          email: parsed.email,
+          familyName: parsed.familyName || 'Mi Cuenta',
+          inviteCode: parsed.inviteCode || 'RATA-SYNC',
+          personalInfo: parsed.personalInfo,
+          createdAt: new Date().toISOString()
+        },
+        profiles: parsed.profiles
+      };
+    }
+  } catch {}
+  return null;
+}
 
 const GUEST_PROFILE_CLIENT: FamilyProfile = {
   id: 'guest-profile',
@@ -208,17 +260,22 @@ export default function RatatubeHubPage() {
     connected: boolean;
     url: string;
     mode: string;
+    hasServiceKey?: boolean;
+    rlsBlocked?: boolean;
   }>({
     connected: true,
     url: 'https://aejfuovgwgweipyyexjt.supabase.co',
-    mode: 'supabase-cloud'
+    mode: 'supabase-cloud',
+    rlsBlocked: false
   });
 
   // Estado del Modal de Autenticación (Iniciar Sesión / Crear Cuenta)
   const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'register' | 'sync-code'>('login');
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [authSyncCodeInput, setAuthSyncCodeInput] = useState('');
   const [authFirstName, setAuthFirstName] = useState('');
   const [authLastName, setAuthLastName] = useState('');
   const [authPhone, setAuthPhone] = useState('');
@@ -226,6 +283,27 @@ export default function RatatubeHubPage() {
   const [authBirthDate, setAuthBirthDate] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Estados de Ajustes de Cuenta y Seguridad
+  const [accountPasswordInput, setAccountPasswordInput] = useState('');
+  const [showAccountPassword, setShowAccountPassword] = useState(false);
+  const [accountPasswordMsg, setAccountPasswordMsg] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
+
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editCountry, setEditCountry] = useState('');
+  const [editBirthDate, setEditBirthDate] = useState('');
+  const [personalInfoMsg, setPersonalInfoMsg] = useState<{
+    text: string;
+    isError?: boolean;
+  } | null>(null);
+
+  const [copiedSyncCode, setCopiedSyncCode] = useState(false);
+  const [copiedSql, setCopiedSql] = useState(false);
 
   // Catálogos Stremio
   const [moviesCatalog, setMoviesCatalog] = useState<StremioMetaItem[]>([]);
@@ -269,6 +347,9 @@ export default function RatatubeHubPage() {
   const [newProfileIsKid, setNewProfileIsKid] = useState(false);
   const [supabaseUrlInput, setSupabaseUrlInput] = useState('');
   const [supabaseKeyInput, setSupabaseKeyInput] = useState('');
+  const [supabaseServiceKeyInput, setSupabaseServiceKeyInput] = useState('');
+  const [showSupabaseKey, setShowSupabaseKey] = useState(false);
+  const [showSupabaseServiceKey, setShowSupabaseServiceKey] = useState(false);
   const [configSavedBanner, setConfigSavedBanner] = useState<string | null>(null);
 
   // 1. Carga inicial: Si no hay sesión iniciada en el navegador, se mantiene en Modo Invitado 100% limpio (0 consultas a Supabase)
@@ -306,6 +387,33 @@ export default function RatatubeHubPage() {
 
     refreshTempDownloadsAndAgent();
   }, []);
+
+  useEffect(() => {
+    if (account?.personalInfo) {
+      setEditFirstName(account.personalInfo.firstName || '');
+      setEditLastName(account.personalInfo.lastName || '');
+      setEditPhone(account.personalInfo.phone || '');
+      setEditCountry(account.personalInfo.country || '');
+      setEditBirthDate(account.personalInfo.birthDate || '');
+    }
+  }, [account]);
+
+  useEffect(() => {
+    if (activeSection === 'perfiles' || activeSection === 'configuracion') {
+      fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'check-rls' })
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.cloudStatus) {
+            setCloudStatus(d.cloudStatus);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeSection]);
 
   const persistSessionToBrowser = (
     acc: FamilyAccount | null,
@@ -377,6 +485,34 @@ export default function RatatubeHubPage() {
     setAuthError(null);
     setAuthLoading(true);
     try {
+      if (authMode === 'sync-code') {
+        const parsed = parseSyncCode(authSyncCodeInput);
+        if (!parsed) {
+          setAuthError(
+            'El código de vinculación no es válido. Asegúrate de copiarlo completo desde tu otro dispositivo.'
+          );
+          setAuthLoading(false);
+          return;
+        }
+        setAccount(parsed.account);
+        setProfiles(parsed.profiles);
+        const mainProf = parsed.profiles[0] || GUEST_PROFILE_CLIENT;
+        setActiveProfile(mainProf);
+        persistSessionToBrowser(parsed.account, parsed.profiles, mainProf, [], []);
+        setShowAuthModal(false);
+        setAuthSyncCodeInput('');
+        fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'sync-to-cloud',
+            account: parsed.account,
+            profiles: parsed.profiles
+          })
+        }).catch(() => {});
+        return;
+      }
+
       let vaultBackup: any = undefined;
       if (authMode === 'login') {
         try {
@@ -2029,6 +2165,301 @@ export default function RatatubeHubPage() {
                 </button>
               </div>
             </div>
+
+            {/* Ajustes de Cuenta y Seguridad (Contraseña, Datos y Sincronización) */}
+            <div className="rounded-2xl border border-white/10 bg-[#121726] p-6 space-y-6">
+              <div className="flex items-center gap-2 text-emerald-400">
+                <Key className="h-5 w-5" />
+                <h2 className="text-lg font-extrabold text-white">
+                  Ajustes de Cuenta y Seguridad
+                </h2>
+              </div>
+
+              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                {/* Cambio de Contraseña con botón de mostrar/ocultar */}
+                <div className="rounded-xl border border-white/10 bg-black/40 p-4 space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-gray-300">
+                    Cambiar Contraseña de la Cuenta
+                  </h3>
+                  <p className="text-xs text-gray-400">
+                    Email de cuenta: <strong className="text-white">{account.email}</strong>
+                  </p>
+                  <div>
+                    <label className="mb-1 block text-[11px] text-gray-300">
+                      Nueva Contraseña
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAccountPassword ? 'text' : 'password'}
+                        value={accountPasswordInput}
+                        onChange={(e) => setAccountPasswordInput(e.target.value)}
+                        placeholder="Escribe tu nueva contraseña"
+                        className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 pr-10 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAccountPassword(!showAccountPassword)}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-emerald-400 transition"
+                        title={showAccountPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
+                      >
+                        {showAccountPassword ? (
+                          <EyeOff className="h-4 w-4" />
+                        ) : (
+                          <Eye className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      if (!accountPasswordInput.trim() || accountPasswordInput.length < 4) {
+                        setAccountPasswordMsg({
+                          text: 'La contraseña debe tener al menos 4 caracteres.',
+                          isError: true
+                        });
+                        return;
+                      }
+                      try {
+                        const res = await fetch('/api/auth', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            action: 'change-password',
+                            email: account.email,
+                            newPassword: accountPasswordInput.trim()
+                          })
+                        });
+                        const data = await res.json();
+                        if (res.ok) {
+                          setAccountPasswordMsg({
+                            text: 'Contraseña actualizada correctamente.',
+                            isError: false
+                          });
+                          setAccountPasswordInput('');
+                        } else {
+                          setAccountPasswordMsg({
+                            text: data.error || 'Error al actualizar contraseña.',
+                            isError: true
+                          });
+                        }
+                      } catch {
+                        setAccountPasswordMsg({ text: 'Error de red.', isError: true });
+                      }
+                    }}
+                    className="w-full rounded-xl bg-emerald-500 py-2 text-xs font-bold text-black hover:bg-emerald-400"
+                  >
+                    Guardar Nueva Contraseña
+                  </button>
+
+                  {accountPasswordMsg && (
+                    <p
+                      className={`text-xs ${
+                        accountPasswordMsg.isError ? 'text-rose-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {accountPasswordMsg.text}
+                    </p>
+                  )}
+                </div>
+
+                {/* Datos Personales Opcionales */}
+                <div className="rounded-xl border border-white/10 bg-black/40 p-4 space-y-3">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-gray-300">
+                    Datos Personales (Opcionales)
+                  </h3>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="mb-1 block text-[11px] text-gray-400">Nombre</label>
+                      <input
+                        type="text"
+                        value={editFirstName}
+                        onChange={(e) => setEditFirstName(e.target.value)}
+                        placeholder="Ej. Juan"
+                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-1.5 text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[11px] text-gray-400">Apellido</label>
+                      <input
+                        type="text"
+                        value={editLastName}
+                        onChange={(e) => setEditLastName(e.target.value)}
+                        placeholder="Ej. Pérez"
+                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-1.5 text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="mb-1 block text-[11px] text-gray-400">Teléfono</label>
+                      <input
+                        type="tel"
+                        value={editPhone}
+                        onChange={(e) => setEditPhone(e.target.value)}
+                        placeholder="+54 9..."
+                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-1.5 text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-[11px] text-gray-400">País</label>
+                      <input
+                        type="text"
+                        value={editCountry}
+                        onChange={(e) => setEditCountry(e.target.value)}
+                        placeholder="Argentina..."
+                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-1.5 text-xs text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-[11px] text-gray-400">
+                      Fecha de Nacimiento
+                    </label>
+                    <input
+                      type="date"
+                      value={editBirthDate}
+                      onChange={(e) => setEditBirthDate(e.target.value)}
+                      className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-1.5 text-xs text-white"
+                    />
+                  </div>
+
+                  <button
+                    onClick={async () => {
+                      try {
+                        const personalInfo = {
+                          firstName: editFirstName.trim(),
+                          lastName: editLastName.trim(),
+                          phone: editPhone.trim(),
+                          country: editCountry.trim(),
+                          birthDate: editBirthDate.trim()
+                        };
+                        const res = await fetch('/api/auth', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            action: 'update-personal-info',
+                            email: account.email,
+                            personalInfo
+                          })
+                        });
+                        if (res.ok) {
+                          const updatedAccount = { ...account, personalInfo };
+                          setAccount(updatedAccount);
+                          persistSessionToBrowser(updatedAccount, profiles, activeProfile);
+                          setPersonalInfoMsg({
+                            text: 'Datos guardados correctamente.',
+                            isError: false
+                          });
+                        }
+                      } catch {
+                        setPersonalInfoMsg({ text: 'Error al guardar datos.', isError: true });
+                      }
+                    }}
+                    className="w-full rounded-xl bg-white/10 py-2 text-xs font-bold text-white hover:bg-white/20"
+                  >
+                    Guardar Datos Personales
+                  </button>
+
+                  {personalInfoMsg && (
+                    <p
+                      className={`text-xs ${
+                        personalInfoMsg.isError ? 'text-rose-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {personalInfoMsg.text}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              {/* Sincronización Multidispositivo y Código de Vinculación */}
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Cloud className="h-4 w-4 text-emerald-400" />
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-white">
+                      Sincronización Multidispositivo (Supabase Cloud)
+                    </h3>
+                  </div>
+                  {cloudStatus.rlsBlocked ? (
+                    <span className="rounded-full bg-amber-500/20 px-2.5 py-0.5 text-[11px] font-bold text-amber-300">
+                      ⚠️ RLS activo en Supabase (Bloquea otros dispositivos)
+                    </span>
+                  ) : (
+                    <span className="rounded-full bg-emerald-500/20 px-2.5 py-0.5 text-[11px] font-bold text-emerald-300">
+                      ✓ Sincronización Cloud Activa
+                    </span>
+                  )}
+                </div>
+
+                {cloudStatus.rlsBlocked && (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 space-y-2">
+                    <p>
+                      <strong>¿Por qué no puedo iniciar sesión desde otro celular o computadora?</strong>
+                      <br />
+                      Tu base de datos Supabase tiene <em>Row Level Security (RLS)</em> activo sin
+                      política de inserción, impidiendo que el servidor guarde la cuenta en la nube
+                      para otros dispositivos.
+                    </p>
+                    <p>
+                      Para solucionarlo en 1 minuto: copia el comando SQL de abajo y pégalo en el{' '}
+                      <strong>SQL Editor</strong> de tu Supabase Dashboard:
+                    </p>
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(SUPABASE_RLS_UNLOCK_SQL);
+                        setCopiedSql(true);
+                        setTimeout(() => setCopiedSql(false), 3000);
+                      }}
+                      className="flex items-center gap-2 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-black text-black hover:bg-amber-400"
+                    >
+                      {copiedSql ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                      {copiedSql ? '¡Copiado al portapapeles!' : 'Copiar comando SQL para Supabase'}
+                    </button>
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-white/10 space-y-2">
+                  <p className="text-xs text-gray-300">
+                    <strong>Código de Vinculación Directa entre Dispositivos:</strong>
+                    <br />
+                    Puedes vincular tu celular, tablet o televisor al instante copiando este código y
+                    pegándolo en el botón "Vincular Dispositivo" de la pantalla de inicio de sesión:
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={generateSyncCode(account, profiles)}
+                      className="flex-1 rounded-xl border border-white/15 bg-black px-3.5 py-2 text-xs font-mono text-gray-300 focus:outline-none select-all"
+                    />
+                    <button
+                      onClick={() => {
+                        const code = generateSyncCode(account, profiles);
+                        navigator.clipboard.writeText(code);
+                        setCopiedSyncCode(true);
+                        setTimeout(() => setCopiedSyncCode(false), 3000);
+                      }}
+                      className="flex items-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-black text-black hover:bg-emerald-400"
+                    >
+                      {copiedSyncCode ? (
+                        <Check className="h-4 w-4" />
+                      ) : (
+                        <Copy className="h-4 w-4" />
+                      )}
+                      {copiedSyncCode ? '¡Copiado!' : 'Copiar'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
               </>
             )}
           </div>
@@ -2072,13 +2503,42 @@ export default function RatatubeHubPage() {
                   placeholder="NEXT_PUBLIC_SUPABASE_URL (https://xyz.supabase.co)"
                   className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
                 />
-                <input
-                  type="password"
-                  value={supabaseKeyInput}
-                  onChange={(e) => setSupabaseKeyInput(e.target.value)}
-                  placeholder="NEXT_PUBLIC_SUPABASE_ANON_KEY"
-                  className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                />
+                <div className="relative">
+                  <input
+                    type={showSupabaseKey ? 'text' : 'password'}
+                    value={supabaseKeyInput}
+                    onChange={(e) => setSupabaseKeyInput(e.target.value)}
+                    placeholder="NEXT_PUBLIC_SUPABASE_ANON_KEY"
+                    className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 pr-10 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSupabaseKey(!showSupabaseKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-emerald-400 transition"
+                    title={showSupabaseKey ? 'Ocultar clave' : 'Ver clave'}
+                  >
+                    {showSupabaseKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+
+                <div className="relative">
+                  <input
+                    type={showSupabaseServiceKey ? 'text' : 'password'}
+                    value={supabaseServiceKeyInput}
+                    onChange={(e) => setSupabaseServiceKeyInput(e.target.value)}
+                    placeholder="SUPABASE_SERVICE_ROLE_KEY (Opcional - bypass de RLS)"
+                    className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 pr-10 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSupabaseServiceKey(!showSupabaseServiceKey)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-emerald-400 transition"
+                    title={showSupabaseServiceKey ? 'Ocultar clave de servicio' : 'Ver clave de servicio'}
+                  >
+                    {showSupabaseServiceKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
+
                 <button
                   onClick={async () => {
                     const res = await fetch('/api/profiles', {
@@ -2087,7 +2547,8 @@ export default function RatatubeHubPage() {
                       body: JSON.stringify({
                         action: 'configure-supabase',
                         url: supabaseUrlInput,
-                        anonKey: supabaseKeyInput
+                        anonKey: supabaseKeyInput,
+                        serviceRoleKey: supabaseServiceKeyInput
                       })
                     });
                     const data = await res.json();
@@ -2101,6 +2562,25 @@ export default function RatatubeHubPage() {
                 >
                   Conectar Proyecto Supabase
                 </button>
+
+                <div className="pt-2 border-t border-white/10">
+                  <p className="text-[11px] text-gray-400 mb-2">
+                    Si al iniciar sesión desde otro dispositivo indica que la cuenta no existe, ejecuta este script en el SQL Editor de tu consola Supabase:
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(SUPABASE_RLS_UNLOCK_SQL);
+                      setCopiedSql(true);
+                      setTimeout(() => setCopiedSql(false), 3000);
+                    }}
+                    className="flex items-center justify-center gap-2 w-full rounded-xl border border-white/20 bg-white/5 py-2 text-xs font-bold text-gray-200 hover:bg-white/10"
+                  >
+                    {copiedSql ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                    {copiedSql ? '¡Comando SQL copiado!' : 'Copiar comando SQL para Supabase'}
+                  </button>
+                </div>
+
                 {configSavedBanner && (
                   <p className="text-center text-xs text-emerald-400">{configSavedBanner}</p>
                 )}
@@ -2234,23 +2714,29 @@ export default function RatatubeHubPage() {
               </div>
               <div>
                 <h2 className="text-lg font-black text-white">
-                  {authMode === 'login' ? 'Iniciar Sesión en Ratatube' : 'Crear Cuenta en Ratatube'}
+                  {authMode === 'login'
+                    ? 'Iniciar Sesión en Ratatube'
+                    : authMode === 'register'
+                    ? 'Crear Cuenta en Ratatube'
+                    : 'Vincular con Código de Dispositivo'}
                 </h2>
                 <p className="text-xs text-gray-400">
-                  Guarda tu historial, continuar viendo y preconfiguraciones
+                  {authMode === 'sync-code'
+                    ? 'Vincula tu celular o TV al instante con tu código de acceso'
+                    : 'Guarda tu historial, continuar viendo y preconfiguraciones'}
                 </p>
               </div>
             </div>
 
-            {/* Pestañas Iniciar Sesión / Crear Cuenta */}
-            <div className="mb-5 grid grid-cols-2 gap-2 rounded-xl bg-black/50 p-1">
+            {/* Pestañas Iniciar Sesión / Crear Cuenta / Vincular Dispositivo */}
+            <div className="mb-5 grid grid-cols-3 gap-1 rounded-xl bg-black/50 p-1">
               <button
                 type="button"
                 onClick={() => {
                   setAuthMode('login');
                   setAuthError(null);
                 }}
-                className={`rounded-lg py-2 text-xs font-bold transition ${
+                className={`rounded-lg py-2 text-[11px] font-bold transition ${
                   authMode === 'login'
                     ? 'bg-emerald-500 text-black shadow'
                     : 'text-gray-300 hover:text-white'
@@ -2264,7 +2750,7 @@ export default function RatatubeHubPage() {
                   setAuthMode('register');
                   setAuthError(null);
                 }}
-                className={`rounded-lg py-2 text-xs font-bold transition ${
+                className={`rounded-lg py-2 text-[11px] font-bold transition ${
                   authMode === 'register'
                     ? 'bg-emerald-500 text-black shadow'
                     : 'text-gray-300 hover:text-white'
@@ -2272,129 +2758,194 @@ export default function RatatubeHubPage() {
               >
                 Crear Cuenta
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('sync-code');
+                  setAuthError(null);
+                }}
+                className={`rounded-lg py-2 text-[11px] font-bold transition ${
+                  authMode === 'sync-code'
+                    ? 'bg-emerald-500 text-black shadow'
+                    : 'text-gray-300 hover:text-white'
+                }`}
+              >
+                Vincular
+              </button>
             </div>
 
-            <form onSubmit={handleAuthSubmit} className="space-y-3.5">
-              <div>
-                <label className="mb-1 block text-xs font-bold text-gray-200">
-                  Correo electrónico (Email) <span className="text-emerald-400">*</span>
-                </label>
-                <input
-                  type="email"
-                  required
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
-                  placeholder="tucorreo@ejemplo.com"
-                  className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-
-              <div>
-                <label className="mb-1 block text-xs font-bold text-gray-200">
-                  Contraseña <span className="text-emerald-400">*</span>
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={4}
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
-                  placeholder="••••••••"
-                  className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
-                />
-              </div>
-
-              {authMode === 'register' && (
-                <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-3.5">
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">
-                    Datos personales (Todos opcionales)
+            {authMode === 'sync-code' ? (
+              <form onSubmit={handleAuthSubmit} className="space-y-4">
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-gray-200">
+                    Código de Vinculación Directa
+                  </label>
+                  <textarea
+                    rows={4}
+                    required
+                    value={authSyncCodeInput}
+                    onChange={(e) => setAuthSyncCodeInput(e.target.value)}
+                    placeholder="Pega aquí el código copiado desde tu otro dispositivo (empieza con RT-...)"
+                    className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 font-mono text-[11px] text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    Encuentra este código en tu PC o dispositivo principal ingresando a la sección{' '}
+                    <strong className="text-emerald-400">Perfiles / Cuenta</strong> y copiando el
+                    "Código de Vinculación".
                   </p>
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="mb-1 block text-[11px] text-gray-400">
-                        Nombre (opcional)
-                      </label>
-                      <input
-                        type="text"
-                        value={authFirstName}
-                        onChange={(e) => setAuthFirstName(e.target.value)}
-                        placeholder="Ej. Juan"
-                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-[11px] text-gray-400">
-                        Apellido (opcional)
-                      </label>
-                      <input
-                        type="text"
-                        value={authLastName}
-                        onChange={(e) => setAuthLastName(e.target.value)}
-                        placeholder="Ej. Pérez"
-                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
-                      />
-                    </div>
-                  </div>
+                </div>
 
-                  <div className="grid grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="mb-1 block text-[11px] text-gray-400">
-                        Teléfono (opcional)
-                      </label>
-                      <input
-                        type="tel"
-                        value={authPhone}
-                        onChange={(e) => setAuthPhone(e.target.value)}
-                        placeholder="+54 9 11..."
-                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="mb-1 block text-[11px] text-gray-400">
-                        País (opcional)
-                      </label>
-                      <input
-                        type="text"
-                        value={authCountry}
-                        onChange={(e) => setAuthCountry(e.target.value)}
-                        placeholder="Argentina, México..."
-                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
-                      />
-                    </div>
+                {authError && (
+                  <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-semibold text-rose-300">
+                    {authError}
                   </div>
+                )}
 
-                  <div>
-                    <label className="mb-1 block text-[11px] text-gray-400">
-                      Fecha de nacimiento (opcional)
-                    </label>
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full rounded-xl bg-emerald-500 py-3 text-xs font-black text-black shadow-lg shadow-emerald-500/20 transition hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  {authLoading ? 'Vinculando...' : 'Vincular este Dispositivo'}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleAuthSubmit} className="space-y-3.5">
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-gray-200">
+                    Correo electrónico (Email) <span className="text-emerald-400">*</span>
+                  </label>
+                  <input
+                    type="email"
+                    required
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    placeholder="tucorreo@ejemplo.com"
+                    className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 text-xs text-white focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-gray-200">
+                    Contraseña <span className="text-emerald-400">*</span>
+                  </label>
+                  <div className="relative">
                     <input
-                      type="date"
-                      value={authBirthDate}
-                      onChange={(e) => setAuthBirthDate(e.target.value)}
-                      className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                      type={showAuthPassword ? 'text' : 'password'}
+                      required
+                      minLength={4}
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full rounded-xl border border-white/15 bg-black px-3.5 py-2.5 pr-10 text-xs text-white focus:border-emerald-500 focus:outline-none"
                     />
+                    <button
+                      type="button"
+                      onClick={() => setShowAuthPassword(!showAuthPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 transition hover:text-emerald-400"
+                      title={showAuthPassword ? 'Ocultar contraseña' : 'Ver contraseña'}
+                    >
+                      {showAuthPassword ? (
+                        <EyeOff className="h-4 w-4" />
+                      ) : (
+                        <Eye className="h-4 w-4" />
+                      )}
+                    </button>
                   </div>
                 </div>
-              )}
 
-              {authError && (
-                <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-semibold text-rose-300">
-                  {authError}
-                </div>
-              )}
+                {authMode === 'register' && (
+                  <div className="space-y-3 rounded-2xl border border-white/10 bg-black/40 p-3.5">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-gray-400">
+                      Datos personales (Todos opcionales)
+                    </p>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="mb-1 block text-[11px] text-gray-400">
+                          Nombre (opcional)
+                        </label>
+                        <input
+                          type="text"
+                          value={authFirstName}
+                          onChange={(e) => setAuthFirstName(e.target.value)}
+                          placeholder="Ej. Juan"
+                          className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11px] text-gray-400">
+                          Apellido (opcional)
+                        </label>
+                        <input
+                          type="text"
+                          value={authLastName}
+                          onChange={(e) => setAuthLastName(e.target.value)}
+                          placeholder="Ej. Pérez"
+                          className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                        />
+                      </div>
+                    </div>
 
-              <button
-                type="submit"
-                disabled={authLoading}
-                className="w-full rounded-xl bg-emerald-500 py-3 text-xs font-black text-black shadow-lg shadow-emerald-500/20 transition hover:bg-emerald-400 disabled:opacity-50"
-              >
-                {authLoading
-                  ? 'Procesando...'
-                  : authMode === 'login'
-                  ? 'Entrar a mi Cuenta'
-                  : 'Crear Cuenta y Guardar Preferencias'}
-              </button>
-            </form>
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <div>
+                        <label className="mb-1 block text-[11px] text-gray-400">
+                          Teléfono (opcional)
+                        </label>
+                        <input
+                          type="tel"
+                          value={authPhone}
+                          onChange={(e) => setAuthPhone(e.target.value)}
+                          placeholder="+54 9 11..."
+                          className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11px] text-gray-400">
+                          País (opcional)
+                        </label>
+                        <input
+                          type="text"
+                          value={authCountry}
+                          onChange={(e) => setAuthCountry(e.target.value)}
+                          placeholder="Argentina, México..."
+                          className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] text-gray-400">
+                        Fecha de nacimiento (opcional)
+                      </label>
+                      <input
+                        type="date"
+                        value={authBirthDate}
+                        onChange={(e) => setAuthBirthDate(e.target.value)}
+                        className="w-full rounded-lg border border-white/10 bg-[#121623] px-3 py-2 text-xs text-white"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {authError && (
+                  <div className="rounded-xl border border-rose-500/40 bg-rose-500/15 px-3.5 py-2 text-xs font-semibold text-rose-300">
+                    {authError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  disabled={authLoading}
+                  className="w-full rounded-xl bg-emerald-500 py-3 text-xs font-black text-black shadow-lg shadow-emerald-500/20 transition hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  {authLoading
+                    ? 'Procesando...'
+                    : authMode === 'login'
+                    ? 'Entrar a mi Cuenta'
+                    : 'Crear Cuenta y Guardar Preferencias'}
+                </button>
+              </form>
+            )}
           </div>
         </div>
       )}

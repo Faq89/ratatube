@@ -16,7 +16,11 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
 
     if (body.action === 'configure-supabase') {
-      const status = configureSupabaseCloud(body.url || '', body.anonKey || '');
+      const status = configureSupabaseCloud(
+        body.url || '',
+        body.anonKey || '',
+        body.serviceRoleKey || ''
+      );
       const full = await getFamilyAccountAndProfiles();
       return NextResponse.json({ status, ...full });
     }

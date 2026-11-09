@@ -106,3 +106,4 @@ npm test
 El repositorio está sincronizado con Vercel para despliegues continuos (CI/CD):
 * **Rama de producción**: `main`
 * Cada `push` a la rama `main` compila y despliega automáticamente la nueva versión en producción.
+
