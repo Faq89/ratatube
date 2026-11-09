@@ -18,7 +18,8 @@ import {
   FPS_DRIFT_PRESETS,
   parseAndValidateSubtitles,
   getActiveSubtitleCues,
-  calculateProgressiveSyncFromTwoPoints
+  calculateProgressiveSyncFromTwoPoints,
+  computeSyncedTimestampMs
 } from '@ratatube/subtitle-engine';
 import {
   Play,
@@ -40,7 +41,8 @@ import {
   Volume2,
   VolumeX,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  ChevronRight
 } from 'lucide-react';
 
 interface VideoPlayerModalProps {
@@ -133,6 +135,9 @@ export default function VideoPlayerModal({
   });
   const [customOffsetInput, setCustomOffsetInput] = useState('0');
   const [syncSavedMsg, setSyncSavedMsg] = useState<string | null>(null);
+  const [syncToastMsg, setSyncToastMsg] = useState<string | null>(null);
+  const [showDriftControls, setShowDriftControls] = useState<boolean>(false);
+  const [selectedCueIndex, setSelectedCueIndex] = useState<number>(0);
 
   // Asistente de 2 puntos para sincronización progresiva
   const [pointA, setPointA] = useState<{ subtitleCueMs: number; actualVideoSpeechMs: number } | null>(
@@ -785,32 +790,116 @@ export default function VideoPlayerModal({
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
-  // Tiempo efectivo actual de la barra de subtítulos en segundos
-  const effectiveSubTimeSec = Math.max(
-    0,
-    Math.min(
-      duration || 7200,
-      currentTime + syncParams.initialOffsetMs / 1000
-    )
-  );
-
-  // Índice de la frase de diálogo actual o inmediatamente siguiente
-  const roundedMovieSec = Math.floor(currentTime);
-  const currentOrNextCueIndex = useMemo(
+  // Pistas de subtítulos en español disponibles
+  const spanishTracks = useMemo(
     () =>
-      parsedCues.findIndex(
-        (c) => c.endMs + syncParams.initialOffsetMs >= roundedMovieSec * 1000
+      subtitleTracks.filter(
+        (t) =>
+          t.lang.toLowerCase().startsWith('es') ||
+          t.lang.toLowerCase() === 'spa' ||
+          t.lang.toLowerCase() === 'spl' ||
+          t.label.toLowerCase().includes('español') ||
+          t.label.toLowerCase().includes('spanish')
       ),
-    [parsedCues, syncParams.initialOffsetMs, roundedMovieSec]
+    [subtitleTracks]
   );
 
-  const jumpToDialogueCue = (cueIndex: number) => {
-    if (cueIndex < 0 || cueIndex >= parsedCues.length) return;
-    const targetCue = parsedCues[cueIndex];
-    // Sincronizar el subtítulo para que esta frase coincida exactamente con el segundo actual
-    const newOffsetMs = Math.round(currentTime * 1000) - targetCue.startMs;
-    setSyncParams((prev) => ({ ...prev, initialOffsetMs: newOffsetMs }));
+  const handleNextSpanishTrack = () => {
+    if (spanishTracks.length <= 1) return;
+    const currentIdx = spanishTracks.findIndex((t) => t.id === selectedSubTrackId);
+    const nextIdx = (currentIdx + 1) % spanishTracks.length;
+    setSelectedSubTrackId(spanishTracks[nextIdx].id);
+    setSyncToastMsg(`Pista de subtítulos cambiada a: ${spanishTracks[nextIdx].label}`);
+    setTimeout(() => setSyncToastMsg(null), 3000);
+  };
+
+  // Encontrar el índice de la frase más cercana a la posición actual del vídeo
+  useEffect(() => {
+    if (!parsedCues.length) return;
+    const currentMs = Math.round(currentTime * 1000);
+    // 1. Buscar si hay una frase activa en este instante
+    const activeIdx = parsedCues.findIndex((c) => {
+      const s = computeSyncedTimestampMs(c.startMs, syncParams);
+      const e = computeSyncedTimestampMs(c.endMs, syncParams);
+      return currentMs >= s && currentMs <= e;
+    });
+    if (activeIdx >= 0) {
+      setSelectedCueIndex(activeIdx);
+      return;
+    }
+    // 2. Si no hay frase activa, buscar la más próxima
+    let closest = 0;
+    let minD = Infinity;
+    for (let i = 0; i < parsedCues.length; i++) {
+      const s = computeSyncedTimestampMs(parsedCues[i].startMs, syncParams);
+      const d = Math.abs(s - currentMs);
+      if (d < minD) {
+        minD = d;
+        closest = i;
+      }
+      if (s > currentMs + 20000 && minD < Infinity) break;
+    }
+    setSelectedCueIndex(closest);
+  }, [currentTime, parsedCues.length]);
+
+  // Sincronizar la frase de diálogo seleccionada para que coincida exactamente con el segundo actual
+  const syncSelectedCueToCurrentTime = (cueIdx: number) => {
+    if (cueIdx < 0 || cueIdx >= parsedCues.length) return;
+    const targetCue = parsedCues[cueIdx];
+    const currentMs = Math.round(currentTime * 1000);
+    const newOffsetMs =
+      currentMs - Math.round(targetCue.startMs * (syncParams.driftScaleFactor || 1.0));
+    setSyncParams((prev) => ({
+      ...prev,
+      initialOffsetMs: newOffsetMs
+    }));
     setCustomOffsetInput(String(newOffsetMs));
+    setSyncToastMsg(
+      `✓ Sincronizado a ${formatTime(currentTime)} (${newOffsetMs >= 0 ? '+' : ''}${newOffsetMs}ms)`
+    );
+    setTimeout(() => setSyncToastMsg(null), 3000);
+  };
+
+  // Asistente de 2 puntos para eliminar desincronización progresiva en toda la película
+  const handleMarkPointA = () => {
+    const currentMs = Math.round(currentTime * 1000);
+    const cue = parsedCues[selectedCueIndex] || parsedCues[0];
+    const cueMs = cue ? cue.startMs : currentMs;
+    setPointA({
+      subtitleCueMs: cueMs,
+      actualVideoSpeechMs: currentMs
+    });
+    setSyncToastMsg(`📍 Punto A fijado en ${formatTime(currentTime)}`);
+    setTimeout(() => setSyncToastMsg(null), 3000);
+  };
+
+  const handleMarkPointBAndCalibrate = () => {
+    if (!pointA) return;
+    const currentMs = Math.round(currentTime * 1000);
+    const cue = parsedCues[selectedCueIndex] || parsedCues[parsedCues.length - 1];
+    const cueMs = cue ? cue.startMs : currentMs;
+
+    const calculated = calculateProgressiveSyncFromTwoPoints(pointA, {
+      subtitleCueMs: cueMs,
+      actualVideoSpeechMs: currentMs
+    });
+    setSyncParams(calculated);
+    setCustomOffsetInput(String(calculated.initialOffsetMs));
+    setSyncToastMsg(
+      `🎯 Calibración 2 puntos: escala ${calculated.driftScaleFactor.toFixed(4)}x, desfase ${
+        calculated.initialOffsetMs
+      }ms`
+    );
+    setTimeout(() => setSyncToastMsg(null), 4000);
+  };
+
+  const applyFpsPreset = (scale: number, label: string) => {
+    setSyncParams((prev) => ({
+      ...prev,
+      driftScaleFactor: scale
+    }));
+    setSyncToastMsg(`⚡ Velocidad: ${label}`);
+    setTimeout(() => setSyncToastMsg(null), 3000);
   };
 
   const resolvedEmbedSrc = selectedStream?.embedUrl || selectedStream?.streamUrl || '';
@@ -1029,54 +1118,115 @@ export default function VideoPlayerModal({
                 </div>
               </div>
 
-              {/* FILA 2: BARRA DE TIEMPO DE SUBTÍTULOS Y CONTROLES (EN PARALELO ARRIBA) */}
+              {/* FILA 2: BARRA DE DESFASE FINO (-10s a +10s CENTRADA EN 0) */}
               {selectedSubTrackId !== 'off' && (
-                <div className="flex items-center gap-3 pt-0.5">
-                  <span className="w-24 shrink-0 text-[11px] font-bold uppercase tracking-wider text-emerald-400">
-                    💬 Subtítulo
-                  </span>
-                  <span className="w-12 text-xs font-mono text-emerald-300">
-                    {formatTime(effectiveSubTimeSec)}
-                  </span>
+                <div className="flex flex-wrap items-center gap-3 pt-0.5">
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+                      ⏱️ Desfase:
+                    </span>
+                    <span
+                      className={`w-16 font-mono text-xs font-bold ${
+                        syncParams.initialOffsetMs === 0 ? 'text-gray-400' : 'text-emerald-300'
+                      }`}
+                    >
+                      {syncParams.initialOffsetMs === 0
+                        ? '0.00s'
+                        : syncParams.initialOffsetMs > 0
+                        ? `+${(syncParams.initialOffsetMs / 1000).toFixed(2)}s`
+                        : `${(syncParams.initialOffsetMs / 1000).toFixed(2)}s`}
+                    </span>
+                  </div>
+
+                  {/* Slider con rango -10s a +10s centrado en 0, con paso de 50ms */}
                   <input
                     type="range"
-                    min={0}
-                    max={duration || 5400}
-                    value={effectiveSubTimeSec}
+                    min={-10}
+                    max={10}
+                    step={0.05}
+                    value={Math.max(-10, Math.min(10, syncParams.initialOffsetMs / 1000))}
                     onChange={(e) => {
-                      const newSubSec = Number(e.target.value);
-                      const newOffsetMs = Math.round((newSubSec - currentTime) * 1000);
+                      const offsetSec = Number(e.target.value);
+                      const offsetMs = Math.round(offsetSec * 1000);
                       setSyncParams((prev) => ({
                         ...prev,
-                        initialOffsetMs: newOffsetMs
+                        initialOffsetMs: offsetMs
                       }));
-                      setCustomOffsetInput(String(newOffsetMs));
+                      setCustomOffsetInput(String(offsetMs));
                     }}
-                    className="h-1.5 flex-1 cursor-pointer accent-emerald-500"
-                    title="Arrastra para adelantar o retrasar los subtítulos"
+                    className="h-1.5 min-w-[140px] flex-1 cursor-pointer accent-emerald-500"
+                    title="Arrastra a la izquierda para adelantar (aparecen antes) o a la derecha para retrasar (aparecen después)"
                   />
-                  <button
-                    onClick={() => {
-                      setSyncParams((prev) => ({ ...prev, initialOffsetMs: 0 }));
-                      setCustomOffsetInput('0');
-                    }}
-                    className="w-14 text-right font-mono text-[11px] text-emerald-400 hover:underline"
-                    title="Clic para reiniciar offset a 0ms"
-                  >
-                    {syncParams.initialOffsetMs >= 0
-                      ? `+${(syncParams.initialOffsetMs / 1000).toFixed(1)}s`
-                      : `${(syncParams.initialOffsetMs / 1000).toFixed(1)}s`}
-                  </button>
+
+                  {/* Botones de micro-ajuste rápido */}
+                  <div className="flex items-center gap-1 shrink-0 text-[11px]">
+                    <button
+                      onClick={() => adjustManualOffset(-500)}
+                      className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-gray-200 hover:bg-emerald-500 hover:text-black"
+                      title="Adelantar subtítulos 500ms"
+                    >
+                      -0.5s
+                    </button>
+                    <button
+                      onClick={() => adjustManualOffset(-100)}
+                      className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-gray-200 hover:bg-emerald-500 hover:text-black"
+                      title="Adelantar subtítulos 100ms"
+                    >
+                      -0.1s
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSyncParams((prev) => ({ ...prev, initialOffsetMs: 0 }));
+                        setCustomOffsetInput('0');
+                      }}
+                      className={`rounded px-2 py-0.5 font-bold transition ${
+                        syncParams.initialOffsetMs === 0
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-white/10 text-gray-300 hover:bg-emerald-500 hover:text-black'
+                      }`}
+                      title="Reiniciar a 0 segundos de desfase"
+                    >
+                      0s
+                    </button>
+                    <button
+                      onClick={() => adjustManualOffset(100)}
+                      className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-gray-200 hover:bg-emerald-500 hover:text-black"
+                      title="Retrasar subtítulos 100ms"
+                    >
+                      +0.1s
+                    </button>
+                    <button
+                      onClick={() => adjustManualOffset(500)}
+                      className="rounded bg-white/10 px-1.5 py-0.5 font-mono text-gray-200 hover:bg-emerald-500 hover:text-black"
+                      title="Retrasar subtítulos 500ms"
+                    >
+                      +0.5s
+                    </button>
+
+                    <button
+                      onClick={() => setShowDriftControls(!showDriftControls)}
+                      className={`ml-1 rounded px-2 py-0.5 text-[11px] font-bold transition ${
+                        showDriftControls || syncParams.driftScaleFactor !== 1.0
+                          ? 'bg-sky-500 text-black'
+                          : 'bg-white/10 text-sky-300 hover:bg-white/20'
+                      }`}
+                      title="Calibración de velocidad FPS y 2 puntos para corregir desincronización progresiva a lo largo de la película"
+                    >
+                      {syncParams.driftScaleFactor !== 1.0
+                        ? `⚡ ${syncParams.driftScaleFactor.toFixed(4)}x`
+                        : '⚡ Calibrar Velocidad/FPS'}
+                    </button>
+                  </div>
                 </div>
               )}
 
-              {/* FILA 3: SELECTOR DE PISTAS, FRASES DE DIÁLOGO Y BOTONES DE AJUSTE */}
+              {/* FILA 3: SELECTOR DE PISTAS, FRASES DE DIÁLOGO Y AUTO-SINCRONIZACIÓN DE 1 CLIC */}
               <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <select
                     value={selectedSubTrackId}
                     onChange={(e) => setSelectedSubTrackId(e.target.value)}
-                    className="max-w-[220px] truncate rounded-lg border border-emerald-500/40 bg-[#171c2b] px-2 py-1 text-xs font-medium text-emerald-300"
+                    className="max-w-[210px] truncate rounded-lg border border-emerald-500/40 bg-[#171c2b] px-2 py-1 text-xs font-medium text-emerald-300"
                   >
                     <option value="off">🚫 Subtítulos: Desactivados</option>
                     {subtitleTracks.map((t) => (
@@ -1086,14 +1236,22 @@ export default function VideoPlayerModal({
                     ))}
                   </select>
 
+                  {spanishTracks.length > 1 && (
+                    <button
+                      onClick={handleNextSpanishTrack}
+                      className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20"
+                      title="Probar otra pista de subtítulos en español de OpenSubtitles"
+                    >
+                      🔄 Cambiar pista ES (
+                      {spanishTracks.findIndex((t) => t.id === selectedSubTrackId) + 1}/
+                      {spanishTracks.length})
+                    </button>
+                  )}
+
                   {selectedSubTrackId !== 'off' && parsedCues.length > 0 && (
                     <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/40 px-1.5 py-0.5 text-xs">
                       <button
-                        onClick={() =>
-                          jumpToDialogueCue(
-                            Math.max(0, (currentOrNextCueIndex >= 0 ? currentOrNextCueIndex : 0) - 1)
-                          )
-                        }
+                        onClick={() => setSelectedCueIndex((prev) => Math.max(0, prev - 1))}
                         className="rounded bg-white/10 px-1.5 py-0.5 font-semibold text-gray-200 hover:bg-emerald-500 hover:text-black"
                         title="Frase anterior"
                       >
@@ -1101,77 +1259,56 @@ export default function VideoPlayerModal({
                       </button>
 
                       <select
-                        value={currentOrNextCueIndex >= 0 ? currentOrNextCueIndex : 0}
-                        onChange={(e) => jumpToDialogueCue(Number(e.target.value))}
-                        className="max-w-[210px] truncate rounded border border-white/10 bg-[#171c2b] px-1.5 py-0.5 text-xs text-gray-200"
-                        title="Elige la frase que se escucha para sincronizar el subtítulo al segundo actual"
+                        value={selectedCueIndex}
+                        onChange={(e) => setSelectedCueIndex(Number(e.target.value))}
+                        className="max-w-[220px] truncate rounded border border-white/10 bg-[#171c2b] px-1.5 py-0.5 text-xs text-gray-200"
+                        title="Elige la frase que se escucha en este momento"
                       >
-                        {parsedCues.slice(0, 400).map((cue, idx) => (
+                        {parsedCues.slice(0, 500).map((cue, idx) => (
                           <option key={cue.index} value={idx}>
-                            [{formatTime(cue.startMs / 1000)}] {cue.text.replace(/\n/g, ' ').slice(0, 42)}
+                            [{formatTime(cue.startMs / 1000)}]{' '}
+                            {cue.text.replace(/\n/g, ' ').slice(0, 40)}
                           </option>
                         ))}
                       </select>
 
                       <button
                         onClick={() =>
-                          jumpToDialogueCue(
-                            Math.min(
-                              parsedCues.length - 1,
-                              (currentOrNextCueIndex >= 0 ? currentOrNextCueIndex : 0) + 1
-                            )
-                          )
+                          setSelectedCueIndex((prev) => Math.min(parsedCues.length - 1, prev + 1))
                         }
                         className="rounded bg-white/10 px-1.5 py-0.5 font-semibold text-gray-200 hover:bg-emerald-500 hover:text-black"
                         title="Siguiente frase"
                       >
                         ⏭
                       </button>
+
+                      <button
+                        onClick={() => syncSelectedCueToCurrentTime(selectedCueIndex)}
+                        className="ml-1 flex items-center gap-1 rounded bg-emerald-500 px-2.5 py-1 text-xs font-black text-black shadow hover:bg-emerald-400"
+                        title="Alinear automáticamente la frase seleccionada con el segundo actual del vídeo"
+                      >
+                        🎯 Sincronizar aquí
+                      </button>
                     </div>
                   )}
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-black/50 px-2 py-0.5 text-xs">
-                    <span className="text-gray-400">Sync:</span>
-                    <button
-                      onClick={() => adjustManualOffset(-250)}
-                      className="rounded bg-white/10 px-1.5 py-0.5 hover:bg-emerald-500 hover:text-black"
-                    >
-                      -250ms
-                    </button>
-                    <button
-                      onClick={() => adjustManualOffset(-100)}
-                      className="rounded bg-white/10 px-1.5 py-0.5 hover:bg-emerald-500 hover:text-black"
-                    >
-                      -100ms
-                    </button>
-                    <span className="px-1 font-mono text-emerald-400">
-                      {syncParams.initialOffsetMs}ms
+                  {syncToastMsg && (
+                    <span className="rounded-lg bg-emerald-500/20 px-2.5 py-0.5 text-xs font-bold text-emerald-300">
+                      {syncToastMsg}
                     </span>
-                    <button
-                      onClick={() => adjustManualOffset(100)}
-                      className="rounded bg-white/10 px-1.5 py-0.5 hover:bg-emerald-500 hover:text-black"
-                    >
-                      +100ms
-                    </button>
-                    <button
-                      onClick={() => adjustManualOffset(250)}
-                      className="rounded bg-white/10 px-1.5 py-0.5 hover:bg-emerald-500 hover:text-black"
-                    >
-                      +250ms
-                    </button>
-                  </div>
+                  )}
 
                   {nextEpisodeObj && onSelectEpisode && (
                     <button
                       onClick={() =>
                         onSelectEpisode(nextEpisodeObj.season, nextEpisodeObj.episode)
                       }
-                      className="flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white hover:bg-emerald-500"
+                      className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-300 hover:bg-emerald-500/20"
                     >
-                      <SkipForward className="h-3.5 w-3.5" />
-                      T{nextEpisodeObj.season}:E{nextEpisodeObj.episode}
+                      <span>Siguiente Ep. {nextEpisodeObj.episode}</span>
+                      <ChevronRight className="h-3.5 w-3.5" />
                     </button>
                   )}
 
@@ -1194,6 +1331,79 @@ export default function VideoPlayerModal({
                   </button>
                 </div>
               </div>
+
+              {/* FILA 4 (DESPLEGABLE): CALIBRADOR DE VELOCIDAD FPS & 2 PUNTOS */}
+              {showDriftControls && selectedSubTrackId !== 'off' && (
+                <div className="mt-1 space-y-2 rounded-xl border border-sky-500/30 bg-sky-950/30 p-2.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-sky-300">
+                      🚀 Corrección de Desfase Progresivo (FPS / Velocidad de reproducción):
+                    </span>
+                    <span className="font-mono font-bold text-sky-400">
+                      {syncParams.driftScaleFactor.toFixed(5)}x
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-gray-400">Presets FPS rápidos:</span>
+                    <button
+                      onClick={() => applyFpsPreset(1.0, '1.0x Normal')}
+                      className={`rounded px-2 py-0.5 text-[11px] font-bold ${
+                        syncParams.driftScaleFactor === 1.0
+                          ? 'bg-sky-400 text-black'
+                          : 'bg-white/10 text-white hover:bg-white/20'
+                      }`}
+                    >
+                      1.0x Normal
+                    </button>
+                    <button
+                      onClick={() => applyFpsPreset(23.976 / 25, '23.98 → 25 fps (+4.1% acelera)')}
+                      className="rounded bg-white/10 px-2 py-0.5 text-[11px] font-bold text-sky-200 hover:bg-sky-500 hover:text-black"
+                      title="Úsalo si los subtítulos van quedando cada vez más atrás con los minutos"
+                    >
+                      ⏩ Subtítulo se retrasa (+4.1% PAL)
+                    </button>
+                    <button
+                      onClick={() => applyFpsPreset(25 / 23.976, '25 → 23.98 fps (-4.1% frena)')}
+                      className="rounded bg-white/10 px-2 py-0.5 text-[11px] font-bold text-sky-200 hover:bg-sky-500 hover:text-black"
+                      title="Úsalo si los subtítulos van apareciendo cada vez más rápido con los minutos"
+                    >
+                      ⏪ Subtítulo se adelanta (-4.1% NTSC)
+                    </button>
+
+                    <div className="ml-auto flex items-center gap-1">
+                      <button
+                        onClick={handleMarkPointA}
+                        className={`rounded px-2 py-0.5 text-[11px] font-bold ${
+                          pointA
+                            ? 'bg-emerald-500 text-black'
+                            : 'bg-white/15 text-white hover:bg-white/25'
+                        }`}
+                        title="1. Marca un diálogo al principio de la película"
+                      >
+                        {pointA ? '✓ Punto A (Inicio)' : '📍 1. Fijar Punto A'}
+                      </button>
+                      <button
+                        disabled={!pointA}
+                        onClick={handleMarkPointBAndCalibrate}
+                        className="rounded bg-emerald-500 px-2 py-0.5 text-[11px] font-black text-black hover:bg-emerald-400 disabled:opacity-40"
+                        title="2. Marca otro diálogo más avanzado y la app calculará la velocidad y desfase exactos"
+                      >
+                        🎯 2. Fijar B y Calibrar
+                      </button>
+                      {pointA && (
+                        <button
+                          onClick={() => setPointA(null)}
+                          className="rounded bg-rose-500/20 px-1.5 py-0.5 text-[10px] text-rose-300 hover:bg-rose-500/30"
+                          title="Cancelar calibración de 2 puntos"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
